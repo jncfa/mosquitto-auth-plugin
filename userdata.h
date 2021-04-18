@@ -9,17 +9,14 @@
 #include "mosquitto.h"
 #include "mqtt_protocol.h"
 
+#include <openssl/ssl.h>
+
 #include "libpq-fe.h"
 
 typedef struct auth_plugin_userdata { // data to store for the duration of the plugin
     PGconn * dbconn; // connection to database
     mosquitto_plugin_id_t * identifier;
+    char* baseACLQuery; // base ACL query
 } auth_plugin_userdata;
 
-
-enum ACL_ACCESS_TYPE{
-    READ=1,
-    WRITE=2,
-    SUBSCRIBE=4
-};
 #endif//__USERDATA_H__

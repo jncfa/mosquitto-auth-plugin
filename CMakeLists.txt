@@ -8,8 +8,7 @@ include_directories(${mosquitto_SOURCE_DIR} ${mosquitto_SOURCE_DIR}/include
 
 link_directories(${mosquitto_BINARY_DIR}/lib ${mosquitto_SOURCE_DIR} ${PostgreSQL_LIBRARY_DIRS} ${OPENSSL_LIBRARY_DIR})
 
-add_library(mosquitto_auth_plugin SHARED mosquitto_auth_plugin.c)
-
+add_library(mosquitto_auth_plugin SHARED mosquitto_auth_plugin.c sub_matches_sub.c utils.c)
 
 target_link_libraries(mosquitto_auth_plugin PRIVATE ${MOSQUITTO_LIBRARIES} ${PostgreSQL_LIBRARIES} ${OPENSSL_LIBRARIES})
 

@@ -1,59 +1,5 @@
 #include "userdata.h"
-#define DEBUG
-
-/*
- * Search through `in' for tokens %c (clientid) and %u (username); build a
- * new malloc'd string at `res' with those tokens interpolated into it.
- */
-
-void t_expand(const char *clientid, const char *username, const char *in, char **res)
-{
-	const char *s;
-	char *work, *wp;
-	int c_specials = 0, u_specials = 0, len;
-	const char *ct, *ut;
-
-	ct = (clientid) ? clientid : "";
-	ut = (username) ? username : "";
-
-	for (s = in; s && *s; s++)
-	{
-		if (*s == '%' && (*(s + 1) == 'c'))
-			c_specials++;
-		if (*s == '%' && (*(s + 1) == 'u'))
-			u_specials++;
-	}
-	len = strlen(in) + 1;
-	len += strlen(clientid) * c_specials;
-	len += strlen(username) * u_specials;
-
-	if ((work = mosquitto_malloc(len)) == NULL)
-	{
-		*res = NULL;
-		return;
-	}
-	for (s = in, wp = work; s && *s; s++)
-	{
-		*wp++ = *s;
-		if (*s == '%' && (*(s + 1) == 'c'))
-		{
-			*--wp = 0;
-			strcpy(wp, ct);
-			wp += strlen(ct);
-			s++;
-		}
-		if (*s == '%' && (*(s + 1) == 'u'))
-		{
-			*--wp = 0;
-			strcpy(wp, ut);
-			wp += strlen(ut);
-			s++;
-		}
-	}
-	*wp = 0;
-
-	*res = work;
-}
+//#define DEBUG
 
 /*
  * Function: mosquitto_auth_acl_check
@@ -138,8 +84,8 @@ static int mosq_auth_acl_check(int event, void *event_data, void *userdata)
 			if (expanded && *expanded)
 			{
 				bool result;
-				mosquitto_topic_matches_sub(expanded, topic, &result);
-
+				//mosquitto_sub_matches(expanded, topic, &result);
+				result = sub_acl_check(expanded, topic);
 #ifdef DEBUG
 				mosquitto_log_printf(MOSQ_LOG_DEBUG, "(mosquitto-auth-plugin) topic_matches(%s, %s) == %d",
 									 expanded, topic, result);
@@ -193,67 +139,98 @@ static int mosq_basic_auth_check(int event, void *event_data, void *userdata)
 #endif
 	// get event data
 	struct mosquitto_evt_basic_auth *ed = event_data;
+	// grab userdata passed to the function
+	struct auth_plugin_userdata *ud = *(auth_plugin_userdata **)userdata;
 
 	// get client certificate and subject
 	X509 *client_cert = mosquitto_client_certificate(ed->client);
-	X509_NAME *name = X509_get_subject_name(client_cert);
 
-	// get index of the common name
-	int commonName_idx = X509_NAME_get_index_by_NID(name, NID_commonName, -1);
-	if (commonName_idx == -1)
-	{
-		// free allocated data
-		X509_free(client_cert);
-		return MOSQ_ERR_UNKNOWN;
-	}
-
-	// get name entry of common name
-	X509_NAME_ENTRY *commonNameEntry = X509_NAME_get_entry(name, commonName_idx);
-	if (commonNameEntry)
-	{
-		// get value of common name
-		ASN1_STRING *name_asn1 = X509_NAME_ENTRY_get_data(commonNameEntry);
-		if (name_asn1 == NULL)
-		{
-			X509_free(client_cert);
-			return MOSQ_ERR_UNKNOWN;
-		}
-		// get user name depending on OpenSSL version
-#if OPENSSL_VERSION_NUMBER < 0x10100000L
-		char *username = (char *)ASN1_STRING_data(name_asn1);
-#else
-		char *username = (char *)ASN1_STRING_get0_data(name_asn1);
-#endif
-
-#ifdef DEBUG
-		mosquitto_log_printf(MOSQ_LOG_DEBUG, "(mosquitto-auth-plugin) Got common name and seting as new username for client: %s", username);
-#endif
-		// set client username
-		int ret = mosquitto_set_username(ed->client, username);
-
-#ifdef DEBUG
-		mosquitto_log_printf(MOSQ_LOG_DEBUG, "(mosquitto-auth-plugin) Setting username returned %u", ret);
-#endif
-		// free allocated memory since it is not longer required
-		X509_free(client_cert);
-
+	if (!strcmp(mosquitto_client_address(ed->client), ud->unixSocketPath)) { // Unix Socket communication (trusted)
+	
 		// get client id and username
 		const char *client_id = mosquitto_client_id(ed->client);
+		// get client id and username
+		const char *client_username = mosquitto_client_username(ed->client);
 
+		// for unix socket communication, the client MUST supply username and client id
+		if (!client_username || !client_id){
+			return MOSQ_ERR_AUTH;
+		}
 		// check if client id is in the certificate's common name / username (as in the specification)
-		if (!strstr(username, client_id))
+		else if (!strstr(client_username, client_id))
 		{
-			mosquitto_log_printf(MOSQ_LOG_DEBUG, "(mosquitto-auth-plugin) Mismatch between client id (%s) and username (%s), connection refused.", username, client_id);
+			mosquitto_log_printf(MOSQ_LOG_DEBUG, "(mosquitto-auth-plugin) Mismatch between client id (%s) and username (%s), connection refused.", client_id, client_username);
 			return MOSQ_ERR_AUTH;
 		}
 		else
 		{
-			mosquitto_log_printf(MOSQ_LOG_DEBUG, "(mosquitto-auth-plugin) Found client id (%s) in username (%s), connection allowed.", username, client_id);
+			mosquitto_log_printf(MOSQ_LOG_DEBUG, "(mosquitto-auth-plugin) Found local client id (%s) in username (%s), connection allowed.", client_id, client_username);
 			return MOSQ_ERR_SUCCESS;
 		}
 	}
+	else if (client_cert){ // TLS IP communication
+		X509_NAME *name = X509_get_subject_name(client_cert);
 
-	X509_free(client_cert);
+		// get index of the common name
+		int commonName_idx = X509_NAME_get_index_by_NID(name, NID_commonName, -1);
+		if (commonName_idx == -1)
+		{
+			// free allocated data
+			X509_free(client_cert);
+			return MOSQ_ERR_UNKNOWN;
+		}
+
+		// get name entry of common name
+		X509_NAME_ENTRY *commonNameEntry = X509_NAME_get_entry(name, commonName_idx);
+		if (commonNameEntry)
+		{
+			// get value of common name
+			ASN1_STRING *name_asn1 = X509_NAME_ENTRY_get_data(commonNameEntry);
+			if (name_asn1 == NULL)
+			{
+				X509_free(client_cert);
+				return MOSQ_ERR_UNKNOWN;
+			}
+			// get user name depending on OpenSSL version
+	#if OPENSSL_VERSION_NUMBER < 0x10100000L
+			char *username = (char *)ASN1_STRING_data(name_asn1);
+	#else
+			char *username = (char *)ASN1_STRING_get0_data(name_asn1);
+	#endif
+
+	#ifdef DEBUG
+			mosquitto_log_printf(MOSQ_LOG_DEBUG, "(mosquitto-auth-plugin) Got common name and seting as new username for client: %s", username);
+	#endif
+			// set client username
+			int ret = mosquitto_set_username(ed->client, username);
+
+	#ifdef DEBUG
+			mosquitto_log_printf(MOSQ_LOG_DEBUG, "(mosquitto-auth-plugin) Setting username returned %u", ret);
+	#endif
+			// free allocated memory since it is not longer required
+			X509_free(client_cert);
+
+			// get client id and username
+			const char *client_id = mosquitto_client_id(ed->client);
+
+			// check if client id is in the certificate's common name / username (as in the specification)
+			if (!strstr(username, client_id))
+			{
+				mosquitto_log_printf(MOSQ_LOG_DEBUG, "(mosquitto-auth-plugin) Mismatch between client id (%s) and username (%s), connection refused.", client_id, username);
+				return MOSQ_ERR_AUTH;
+			}
+			else
+			{
+				mosquitto_log_printf(MOSQ_LOG_DEBUG, "(mosquitto-auth-plugin) Found client id (%s) in username (%s), connection allowed.", client_id, username);
+				return MOSQ_ERR_SUCCESS;
+			}
+		}
+
+		X509_free(client_cert);
+		return MOSQ_ERR_UNKNOWN;
+	}
+
+	// unknown error
 	return MOSQ_ERR_UNKNOWN;
 }
 
@@ -297,7 +274,9 @@ int mosquitto_plugin_init(mosquitto_plugin_id_t *identifier, void **userdata, st
 	// setup connection via peer authentication, therefore no password is exchanged
 	const char *baseConninfo = "dbname='%s' port=%s";
 
-	char *dbname = NULL, *dbport = NULL, *baseACLQuery = NULL;
+	char *dbname = NULL, *dbport = NULL;
+	data->baseACLQuery = NULL;
+	data->unixSocketPath = NULL;
 
 	mosquitto_log_printf(MOSQ_LOG_DEBUG, "(mosquitto-auth-plugin) Parsing options, recieved %u options.", option_count);
 	struct mosquitto_opt *option = options;
@@ -326,18 +305,26 @@ int mosquitto_plugin_init(mosquitto_plugin_id_t *identifier, void **userdata, st
 		else if (!strcmp(option->key, "db_aclquery"))
 		{
 			data->baseACLQuery = mosquitto_strdup(option->value);
-			baseACLQuery = data->baseACLQuery;
 			// error allocating memory
-			if (baseACLQuery == NULL)
+			if (data->baseACLQuery == NULL)
+			{
+				return MOSQ_ERR_NOMEM;
+			}
+		}
+		else if (!strcmp(option->key, "unixsocket_path"))
+		{
+			data->unixSocketPath = mosquitto_strdup(option->value);
+			// error allocating memory
+			if (data->unixSocketPath == NULL)
 			{
 				return MOSQ_ERR_NOMEM;
 			}
 		}
 	}
 	// if name or port is not set then exit
-	if (!(dbname && dbport && baseACLQuery))
+	if (!(dbname && dbport && data->baseACLQuery && data->unixSocketPath))
 	{
-		mosquitto_log_printf(MOSQ_LOG_ERR, "(mosquitto-auth-plugin) Couldn't retrieve all parameters from configuration file, make sure you are setting it properly! (%p %p %p)", dbname, dbport, baseACLQuery);
+		mosquitto_log_printf(MOSQ_LOG_ERR, "(mosquitto-auth-plugin) Couldn't retrieve all parameters from configuration file, make sure you are setting it properly! (%p %p %p %p)", dbname, dbport, data->baseACLQuery, data->unixSocketPath);
 		return MOSQ_ERR_UNKNOWN;
 	}
 
@@ -425,6 +412,7 @@ int mosquitto_plugin_cleanup(void *userdata, struct mosquitto_opt *options, int 
 	PQfinish(data->dbconn);
 
 	// free allocated data
+	mosquitto_free(data->unixSocketPath);
 	mosquitto_free(data->baseACLQuery);
 	mosquitto_free(data);
 

@@ -10,13 +10,14 @@
 #include "mqtt_protocol.h"
 
 #include <openssl/ssl.h>
-
+#include "utils.h"
 #include "libpq-fe.h"
 
 typedef struct auth_plugin_userdata { // data to store for the duration of the plugin
     PGconn * dbconn; // connection to database
-    mosquitto_plugin_id_t * identifier;
+    mosquitto_plugin_id_t * identifier; // identifier for setting up callbacks
     char* baseACLQuery; // base ACL query
+    char* unixSocketPath; // path to unix socket (to validate unix socket connections)
 } auth_plugin_userdata;
 
 #endif//__USERDATA_H__
